@@ -88,7 +88,7 @@ public:
             switch (msg.type) {
 
                 case MSG_BUTTON_SHORT:
-                    if (state == STATE_IDLE) {
+                    if (state == STATE_IDLE || state == STATE_EDIT) {
                         state = STATE_RUNNING;
                         Serial.println("[UI] State → RUNNING");
                     }
