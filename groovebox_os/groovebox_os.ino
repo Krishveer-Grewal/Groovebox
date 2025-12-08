@@ -5,20 +5,20 @@
 // Instantiate global MessageBus
 MessageBus BUS;
 
-// ---- CREATE SERVICES ----
-LEDService led(16);         // External LED on GPIO 16
-ButtonService button(17);   // Button on GPIO 17
-SequencerService sequencer;
+LEDService led(16);
+ButtonService button(17);
+UIService ui;
+SequencerService sequencer(&ui);
 LogService logger;
 
-// Service table
 Service* services[] = {
     &led,
     &button,
+    &ui,
     &sequencer,
     &logger
-    
 };
+
 
 const int NUM_SERVICES = sizeof(services) / sizeof(Service*);
 
