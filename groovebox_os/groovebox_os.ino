@@ -5,19 +5,20 @@
 // Instantiate global MessageBus
 MessageBus BUS;
 
-LEDService led(16);
-ButtonService button(17);
+ButtonService button(16);
 UIService ui;
-SequencerService sequencer(&ui);
 LogService logger;
+LEDGridService ledGrid(17, 4, 5, 18
+    , &ui.state, &ui.cursor, ui.pattern);
+SequencerService sequencer(&ui, &ledGrid);
 
 Service* services[] = {
-    &led,
     &button,
     &ui,
-    &sequencer,
-    &logger
+    &ledGrid,
+    &sequencer
 };
+
 
 
 const int NUM_SERVICES = sizeof(services) / sizeof(Service*);
