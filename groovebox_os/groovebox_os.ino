@@ -1,41 +1,44 @@
+#include <Arduino.h>
 #include "service_base.h"
 #include "message_bus.h"
 #include "services.h"
 
-// Instantiate global MessageBus
+// --------------------- GLOBAL MESSAGE BUS ---------------------
 MessageBus BUS;
 
-ButtonService button(16);
+// --------------------- CREATE SERVICES -----------------------
+ButtonService button(16);              // Your working button pin
 UIService ui;
+AudioService audio(25);                // AUDIO OUT on GPIO25 → resistor → headphones
+LEDGridService ledGrid(17, 4, 5, 18, &ui.state, &ui.cursor, ui.pattern);
+SequencerService sequencer(&ui, &ledGrid, &audio);
 LogService logger;
-LEDGridService ledGrid(17, 4, 5, 18
-    , &ui.state, &ui.cursor, ui.pattern);
-SequencerService sequencer(&ui, &ledGrid);
 
+// --------------------- SERVICE TABLE -------------------------
 Service* services[] = {
     &button,
     &ui,
+    &sequencer,
+    &audio,
     &ledGrid,
-    &sequencer
+    &logger
 };
-
-
 
 const int NUM_SERVICES = sizeof(services) / sizeof(Service*);
 
-// ---------------------- SETUP -----------------------
+// --------------------- SETUP --------------------------------
 void setup() {
     Serial.begin(115200);
-    delay(500);
+    delay(300);
+
     Serial.println("\n[BOOT] Groovebox OS Starting...");
-
-    for (int i = 0; i < NUM_SERVICES; i++)
+    for (int i = 0; i < NUM_SERVICES; i++) {
         services[i]->init();
-
-    Serial.println("[BOOT] Services initialized successfully.");
+    }
+    Serial.println("[BOOT] All services initialized.\n");
 }
 
-// ---------------------- MAIN LOOP -------------------
+// --------------------- MAIN LOOP -----------------------------
 void loop() {
     for (int i = 0; i < NUM_SERVICES; i++) {
         services[i]->update();

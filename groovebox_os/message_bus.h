@@ -14,20 +14,18 @@ public:
     volatile int head = 0;
     volatile int tail = 0;
 
-    bool send(const Message &msg) {
+    bool send(const Message& m) {
         int next = (head + 1) % MAX_MESSAGES;
-        if (next == tail) return false; // queue full
-        queue[head] = msg;
+        if (next == tail) return false;   // full
+        queue[head] = m;
         head = next;
         return true;
     }
 
-    bool receive(Message &msg) {
-        if (tail == head) return false; // empty
-        msg = queue[tail];
+    bool receive(Message& m) {
+        if (tail == head) return false;   // empty
+        m = queue[tail];
         tail = (tail + 1) % MAX_MESSAGES;
         return true;
     }
 };
-
-extern MessageBus BUS;

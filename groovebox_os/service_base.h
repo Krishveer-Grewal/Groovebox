@@ -1,5 +1,4 @@
 #pragma once
-
 class Service {
 public:
     virtual void init() {}
