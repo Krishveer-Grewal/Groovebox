@@ -12,8 +12,8 @@
 #define VISIBLE_STEPS 4
 
 // WiFi + MQTT (EDIT THESE)
-static const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+static const char* WIFI_SSID     = "Silverado@2015";
+static const char* WIFI_PASSWORD = "Krishveer@2005";
 
 // MQTT broker = your Mosquitto machine IP (example: your Linux laptop running mosquitto)
 static const char* MQTT_BROKER_IP = "10.0.0.126";
@@ -104,7 +104,7 @@ public:
     mqtt.loop();
   }
 
-  bool isConnected() const {
+  bool isConnected() {
     return (WiFi.status() == WL_CONNECTED) && mqtt.connected();
   }
 
