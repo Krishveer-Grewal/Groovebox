@@ -1,119 +1,101 @@
 #include <Arduino.h>
-#include "service_base.h"
-#include "message_bus.h"
-
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-// ------------------------------
+#include "service_base.h"
+#include "message_bus.h"
+
+// -----------------------------
 // CONFIG
-// ------------------------------
+// -----------------------------
 #define NUM_STEPS 8
 #define VISIBLE_STEPS 4
 
-// WiFi + MQTT (EDIT THESE)
-static const char* WIFI_SSID     = "Silverado@2015";
-static const char* WIFI_PASSWORD = "Krishveer@2005";
+// -----------------------------
+// Message Types (local bus only)
+// -----------------------------
+enum {
+  MSG_BUTTON_SHORT = 1,
+  MSG_BUTTON_LONG  = 2,
+};
 
-// MQTT broker = your Mosquitto machine IP (example: your Linux laptop running mosquitto)
-static const char* MQTT_BROKER_IP = "10.0.0.126";
-static const int   MQTT_BROKER_PORT = 1883;
-
-// ------------------------------
-// Message Types (for Button -> UI)
-// ------------------------------
-#define MSG_BUTTON_SHORT  1
-#define MSG_BUTTON_LONG   2
-
-// ------------------------------
+// -----------------------------
 // System State
-// ------------------------------
+// -----------------------------
 enum SystemState {
   STATE_IDLE,
   STATE_RUNNING,
   STATE_EDIT
 };
 
-// ------------------------------
+// -----------------------------
 // Globals
-// ------------------------------
+// -----------------------------
 MessageBus BUS;
 
-// =============================================================
-// Cloud (MQTT) Publisher Service
-// =============================================================
+// -----------------------------
+// Cloud/MQTT Service
+// -----------------------------
 class CloudService : public Service {
+  const char* ssid;
+  const char* password;
+  const char* broker;
+
   WiFiClient wifiClient;
   PubSubClient mqtt;
 
-  unsigned long lastReconnectAttempt = 0;
+  float lastBpm = -1.0f;
+  int lastState = -1;
 
 public:
-  CloudService() : mqtt(wifiClient) {}
+  CloudService(const char* s, const char* p, const char* b)
+    : ssid(s), password(p), broker(b), mqtt(wifiClient) {}
 
   void init() override {
-    Serial.println("[CLOUD] init()");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
     Serial.print("[CLOUD] Connecting to WiFi");
+    WiFi.begin(ssid, password);
+
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED) {
       delay(300);
       Serial.print(".");
-      // Don't hard-lock forever
       if (millis() - start > 15000) {
-        Serial.println("\n[CLOUD] WiFi connect timeout (continuing without MQTT)");
+        Serial.println("\n[CLOUD] WiFi timeout (continuing without cloud)");
         return;
       }
     }
+
     Serial.println("\n[CLOUD] WiFi connected");
     Serial.print("[CLOUD] IP: ");
     Serial.println(WiFi.localIP());
 
-    mqtt.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT);
+    mqtt.setServer(broker, 1883);
     reconnect();
   }
 
   void reconnect() {
     if (WiFi.status() != WL_CONNECTED) return;
-    if (mqtt.connected()) return;
 
-    Serial.print("[CLOUD] MQTT connecting… ");
-    // clientId must be unique-ish
-    String clientId = "groovebox-esp32-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-    if (mqtt.connect(clientId.c_str())) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed rc=");
-      Serial.println(mqtt.state());
-    }
-  }
-
-  void loopMqtt() {
-    if (WiFi.status() != WL_CONNECTED) return;
-
-    if (!mqtt.connected()) {
-      unsigned long now = millis();
-      if (now - lastReconnectAttempt > 1000) {
-        lastReconnectAttempt = now;
-        reconnect();
+    while (!mqtt.connected()) {
+      Serial.print("[CLOUD] MQTT connecting… ");
+      if (mqtt.connect("groovebox-esp32")) {
+        Serial.println("connected");
+      } else {
+        Serial.print("failed rc=");
+        Serial.println(mqtt.state());
+        delay(1000);
       }
-      return;
     }
-    mqtt.loop();
   }
 
   bool isConnected() {
     return (WiFi.status() == WL_CONNECTED) && mqtt.connected();
   }
 
-  // --- Publish helpers ---
-  void publishTransport(bool running) {
-    if (!isConnected()) return;
-    mqtt.publish("groovebox/transport", running ? "start" : "stop");
-    Serial.print("[CLOUD] transport -> ");
-    Serial.println(running ? "start" : "stop");
+  void loopMqtt() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (!mqtt.connected()) reconnect();
+    if (mqtt.connected()) mqtt.loop();
   }
 
   void publishTempo(float bpm) {
@@ -121,31 +103,53 @@ public:
     char buf[64];
     snprintf(buf, sizeof(buf), "{ \"bpm\": %.2f }", bpm);
     mqtt.publish("groovebox/tempo", buf);
-    Serial.print("[CLOUD] tempo -> ");
-    Serial.println(buf);
   }
 
-  void publishNote(int note, int velocity, bool on, int step) {
+  void publishTransport(SystemState st) {
     if (!isConnected()) return;
-    char buf[96];
-    snprintf(buf, sizeof(buf),
-             "{ \"note\": %d, \"velocity\": %d, \"on\": %s, \"step\": %d }",
-             note, velocity, on ? "true" : "false", step);
-    mqtt.publish("groovebox/note", buf);
-    Serial.print("[CLOUD] note -> ");
-    Serial.println(buf);
+    if (st == STATE_RUNNING) mqtt.publish("groovebox/transport", "start");
+    else mqtt.publish("groovebox/transport", "stop");
   }
 
-  void update() override {
+  void publishNote(bool on, int note, int velocity) {
+    if (!isConnected()) return;
+    char buf[128];
+    snprintf(
+      buf,
+      sizeof(buf),
+      "{ \"on\": %s, \"note\": %d, \"velocity\": %d }",
+      on ? "true" : "false",
+      note,
+      velocity
+    );
+    mqtt.publish("groovebox/note", buf);
+  }
+
+  // called by UI/Sequencer each frame
+  void tick(float bpm, SystemState st) {
     loopMqtt();
+
+    // tempo change
+    if (bpm != lastBpm) {
+      publishTempo(bpm);
+      lastBpm = bpm;
+      Serial.print("[CLOUD] BPM -> ");
+      Serial.println(bpm);
+    }
+
+    // transport change
+    if ((int)st != lastState) {
+      publishTransport(st);
+      lastState = (int)st;
+      Serial.print("[CLOUD] TRANSPORT -> ");
+      Serial.println(st == STATE_RUNNING ? "start" : "stop");
+    }
   }
 };
 
-CloudService cloud;
-
-// =============================================================
+// -----------------------------
 // Button Service
-// =============================================================
+// -----------------------------
 class ButtonService : public Service {
   int pin;
   bool last = HIGH;
@@ -171,8 +175,7 @@ public:
 
       Message m;
       m.type = (d < 500) ? MSG_BUTTON_SHORT : MSG_BUTTON_LONG;
-      m.data1 = 0;
-      m.data2 = 0;
+      m.data1 = 0; m.data2 = 0; m.data3 = 0;
       BUS.send(m);
     }
 
@@ -180,38 +183,35 @@ public:
   }
 };
 
-// =============================================================
+// -----------------------------
 // UI Service (state + cursor + pattern + tap tempo)
-// =============================================================
+// -----------------------------
 class UIService : public Service {
 public:
   SystemState state = STATE_IDLE;
+
   bool pattern[NUM_STEPS] = { false };
   int cursor = 0;
 
   // tempo
   float bpm = 120.0f;
-  unsigned long stepIntervalMs = 500;
+  unsigned long stepIntervalMs = 500;   // ms per step
   unsigned long lastTapTime = 0;
 
   // edit UX
   unsigned long lastEditShort = 0;
   const unsigned long doubleTapWindow = 400;
 
-  // publish guards
-  SystemState lastPublishedState = STATE_IDLE;
-  float lastPublishedBpm = -1.0f;
-
   void init() override {
     Serial.println("[UI] init()");
   }
 
-  int page() const {
-    return cursor / VISIBLE_STEPS;
-  }
-
   unsigned long getStepInterval() const {
     return stepIntervalMs;
+  }
+
+  int page() const {
+    return cursor / VISIBLE_STEPS;
   }
 
   void handleTapTempo() {
@@ -221,6 +221,7 @@ public:
     if (lastTapTime != 0) {
       unsigned long delta = now - lastTapTime;
 
+      // sanity window
       if (delta >= 150 && delta <= 2000) {
         float newBpm = 60000.0f / (float)delta;
         bpm = bpm * 0.6f + newBpm * 0.4f;
@@ -236,7 +237,6 @@ public:
   }
 
   void update() override {
-    // 1) handle button messages
     Message msg;
     while (BUS.receive(msg)) {
       switch (msg.type) {
@@ -251,6 +251,8 @@ public:
           }
           else if (state == STATE_EDIT) {
             unsigned long now = millis();
+
+            // double short exits edit
             if (now - lastEditShort < doubleTapWindow) {
               state = STATE_RUNNING;
               Serial.println("[UI] EXIT EDIT -> RUNNING");
@@ -265,11 +267,11 @@ public:
           break;
 
         case MSG_BUTTON_LONG:
-          if (state != STATE_EDIT) {
+          if (state == STATE_RUNNING) {
             state = STATE_EDIT;
-            cursor = 0;
             Serial.println("[UI] State -> EDIT");
-          } else {
+          }
+          else if (state == STATE_EDIT) {
             pattern[cursor] = !pattern[cursor];
             Serial.print("[UI] Step ");
             Serial.print(cursor);
@@ -282,29 +284,15 @@ public:
           break;
       }
     }
-
-    // 2) publish state/tempo changes (non-blocking)
-    if (state != lastPublishedState) {
-      cloud.publishTransport(state == STATE_RUNNING);
-      lastPublishedState = state;
-    }
-
-    // publish bpm changes (only when running OR after a tap)
-    if (fabs(bpm - lastPublishedBpm) > 0.01f) {
-      cloud.publishTempo(bpm);
-      lastPublishedBpm = bpm;
-    }
   }
 };
 
-UIService ui;
-
-// =============================================================
-// LED Grid Service
-// =============================================================
+// -----------------------------
+// LED Grid Service (4 LEDs show current page)
+// -----------------------------
 class LEDGridService : public Service {
   int pins[VISIBLE_STEPS];
-  UIService* uiRef;
+  UIService* ui;
 
   unsigned long lastBlink = 0;
   bool blink = false;
@@ -313,7 +301,7 @@ public:
   int currentStep = -1;
 
   LEDGridService(int p0, int p1, int p2, int p3, UIService* u)
-    : uiRef(u)
+    : ui(u)
   {
     pins[0] = p0;
     pins[1] = p1;
@@ -336,20 +324,19 @@ public:
       lastBlink = now;
     }
 
-    int baseStep = uiRef->page() * VISIBLE_STEPS;
+    int baseStep = ui->page() * VISIBLE_STEPS;
 
     for (int i = 0; i < VISIBLE_STEPS; i++) {
       int stepIndex = baseStep + i;
       bool on = false;
 
-      if (uiRef->state == STATE_RUNNING && stepIndex == currentStep) {
-        on = true;  // playhead
+      if (ui->state == STATE_RUNNING) {
+        if (stepIndex == currentStep) on = true;
+        else if (stepIndex < NUM_STEPS && ui->pattern[stepIndex]) on = blink;
       }
-      else if (uiRef->state == STATE_EDIT && stepIndex == uiRef->cursor) {
-        on = true;  // cursor highlight
-      }
-      else if (stepIndex < NUM_STEPS && uiRef->pattern[stepIndex]) {
-        on = blink; // pattern steps blink
+      else if (ui->state == STATE_EDIT) {
+        if (stepIndex == ui->cursor) on = true;
+        else if (stepIndex < NUM_STEPS && ui->pattern[stepIndex]) on = blink;
       }
 
       digitalWrite(pins[i], on ? HIGH : LOW);
@@ -357,75 +344,105 @@ public:
   }
 };
 
-LEDGridService leds(17, 4, 5, 18, &ui);
-
-// =============================================================
-// Sequencer Service
-// =============================================================
+// -----------------------------
+// Sequencer Service (clocked)
+// -----------------------------
 class SequencerService : public Service {
-  UIService* uiRef;
-  LEDGridService* ledsRef;
+  UIService* ui;
+  LEDGridService* leds;
+  CloudService* cloud;
 
-  unsigned long lastStepTime = 0;
+  unsigned long lastStep = 0;
   int step = 0;
 
+  // MIDI mapping (Kick for now)
+  const int MIDI_NOTE = 36;
+  const int VELOCITY  = 100;
+
+  // note-off timing
+  bool noteActive = false;
+  unsigned long noteOffAt = 0;
+
 public:
-  SequencerService(UIService* u, LEDGridService* l)
-    : uiRef(u), ledsRef(l) {}
+  SequencerService(UIService* u, LEDGridService* l, CloudService* c)
+    : ui(u), leds(l), cloud(c) {}
 
   void init() override {
     Serial.println("[SEQ] init()");
   }
 
   void update() override {
-    if (uiRef->state != STATE_RUNNING) return;
+    // keep MQTT alive + publish tempo/transport continuously
+    cloud->tick(ui->bpm, ui->state);
+
+    if (ui->state != STATE_RUNNING) {
+      // if we stop while a note is active, send off
+      if (noteActive) {
+        cloud->publishNote(false, MIDI_NOTE, 0);
+        noteActive = false;
+      }
+      return;
+    }
 
     unsigned long now = millis();
-    unsigned long interval = uiRef->getStepInterval();
+    unsigned long interval = ui->getStepInterval();
     if (interval < 50) interval = 50;
 
-    if (now - lastStepTime < interval) return;
-    lastStepTime = now;
+    // send note-off if time
+    if (noteActive && now >= noteOffAt) {
+      cloud->publishNote(false, MIDI_NOTE, 0);
+      noteActive = false;
+    }
 
-    ledsRef->currentStep = step;
+    if (now - lastStep < interval) return;
+    lastStep = now;
 
-    // Trigger: publish note event when step is ON
-    if (uiRef->pattern[step]) {
+    leds->currentStep = step;
+
+    if (ui->pattern[step]) {
       Serial.print("[SEQ] Step ");
       Serial.print(step);
       Serial.println(" TRIGGER");
 
-      // Kick note = 36 (C2) is a good default for FL/FPC
-      cloud.publishNote(36, 100, true, step);
-      // optional: send note off shortly after (bridge can also gate)
-      cloud.publishNote(36, 0, false, step);
+      cloud->publishNote(true, MIDI_NOTE, VELOCITY);
+      noteActive = true;
+      noteOffAt = now + 60; // short drum hit
     }
 
     step = (step + 1) % NUM_STEPS;
   }
 };
 
-SequencerService sequencer(&ui, &leds);
+// -----------------------------
+// WiFi/MQTT credentials
+// -----------------------------
+const char* WIFI_SSID = "Silverado@2015";
+const char* WIFI_PASS = "Krishveer@2005";
+const char* MQTT_BROKER = "10.0.0.126"; // <-- your Linux IP running mosquitto
 
-// =============================================================
+// -----------------------------
 // Services
-// =============================================================
+// -----------------------------
 ButtonService button(16);
+UIService ui;
+LEDGridService leds(17, 4, 5, 18, &ui);
+CloudService cloud(WIFI_SSID, WIFI_PASS, MQTT_BROKER);
+SequencerService sequencer(&ui, &leds, &cloud);
 
 Service* services[] = {
-  &cloud,
   &button,
   &ui,
   &leds,
+  &cloud,
   &sequencer
 };
 
 const int NUM_SERVICES = sizeof(services) / sizeof(Service*);
 
-// =============================================================
+// -----------------------------
 void setup() {
   Serial.begin(115200);
-  delay(1500);
+  delay(1000);
 
   Serial.println("=== BOOT ===");
 

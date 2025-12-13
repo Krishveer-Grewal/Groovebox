@@ -1,204 +1,148 @@
 import json
 import time
 import threading
-from typing import Optional
 
 import paho.mqtt.client as mqtt
 import mido
 
-# -----------------------
-# CONFIG (EDIT THESE)
-# -----------------------
-BROKER_HOST = "10.0.0.126"   # your Mosquitto IP (Linux box)
+# ----------------------------
+# CONFIG
+# ----------------------------
+BROKER_HOST = "10.0.0.126"   # Linux mosquitto IP (same as MQTT_BROKER in ESP32)
 BROKER_PORT = 1883
 
-MQTT_TOPIC = "groovebox/#"
+# If this substring is found in a MIDI output name, we use it.
+# On Windows, for FL, choose your loopMIDI port name substring (e.g. "Groovebox" or "loopMIDI").
+MIDI_OUT_NAME_CONTAINS = "loopMIDI"   # change to match your port name
 
-# MIDI output port selection
-# If you only see "Midi Through", set this to "Midi Through"
-# On Windows with loopMIDI, set it to your loopMIDI port name (e.g. "Groovebox")
-MIDI_OUT_NAME_CONTAINS = "Groovebox"
+TOPIC_TEMPO = "groovebox/tempo"
+TOPIC_TRANSPORT = "groovebox/transport"
+TOPIC_NOTE = "groovebox/note"
 
-# MIDI channel 1 = 0 in mido
-MIDI_CHANNEL = 0
+# ----------------------------
+# MIDI Clock Engine
+# ----------------------------
+class MidiClock:
+    def __init__(self, midi_out):
+        self.midi_out = midi_out
+        self.bpm = 120.0
+        self.running = False
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-# Gate time for note_off if you only receive note_on
-DEFAULT_GATE_MS = 60
+    def set_bpm(self, bpm: float):
+        with self._lock:
+            self.bpm = max(20.0, min(300.0, float(bpm)))
 
-# -----------------------
-# State
-# -----------------------
-running = False
-bpm = 120.0
-midi_out: Optional[mido.ports.BaseOutput] = None
+    def start(self):
+        with self._lock:
+            if not self.running:
+                self.running = True
+                self.midi_out.send(mido.Message("start"))
 
+    def stop(self):
+        with self._lock:
+            if self.running:
+                self.running = False
+                self.midi_out.send(mido.Message("stop"))
 
+    def _run(self):
+        # MIDI clock is 24 pulses per quarter note.
+        # Pulse interval = 60 / (BPM * 24)
+        next_time = time.perf_counter()
+        while True:
+            with self._lock:
+                bpm = self.bpm
+                running = self.running
+
+            if running:
+                interval = 60.0 / (bpm * 24.0)
+                now = time.perf_counter()
+                if now >= next_time:
+                    self.midi_out.send(mido.Message("clock"))
+                    next_time += interval
+                else:
+                    time.sleep(min(0.001, next_time - now))
+            else:
+                time.sleep(0.01)
+                next_time = time.perf_counter()
+
+# ----------------------------
+# MIDI OUT selection
+# ----------------------------
 def find_midi_out():
     names = mido.get_output_names()
     if not names:
         raise RuntimeError("No MIDI output ports found.")
+
+    print("Available MIDI OUT ports:")
+    for i, n in enumerate(names):
+        print(f"  [{i}] {n}")
+
     for n in names:
         if MIDI_OUT_NAME_CONTAINS.lower() in n.lower():
-            print(f"[MIDI] Using output: {n}")
+            print(f"\nUsing MIDI OUT: {n}")
             return mido.open_output(n)
-    # fallback: if only one port exists, use it
-    if len(names) == 1:
-        print(f"[MIDI] Using only available output: {names[0]}")
-        return mido.open_output(names[0])
+
     raise RuntimeError(f"Could not find MIDI out containing '{MIDI_OUT_NAME_CONTAINS}'. Available: {names}")
 
-
-def send_start():
-    global midi_out
-    if midi_out is None:
-        return
-    midi_out.send(mido.Message('start'))
-    print("[MIDI] START")
-
-
-def send_stop():
-    global midi_out
-    if midi_out is None:
-        return
-    midi_out.send(mido.Message('stop'))
-    print("[MIDI] STOP")
-
-
-def send_note(note: int, velocity: int, on: bool):
-    global midi_out
-    if midi_out is None:
-        return
-    if on:
-        midi_out.send(mido.Message('note_on', note=note, velocity=velocity, channel=MIDI_CHANNEL))
-        print(f"[MIDI] NOTE ON  note={note} vel={velocity}")
-    else:
-        midi_out.send(mido.Message('note_off', note=note, velocity=0, channel=MIDI_CHANNEL))
-        print(f"[MIDI] NOTE OFF note={note}")
-
-
-def schedule_note_off(note: int, delay_ms: int):
-    def _worker():
-        time.sleep(delay_ms / 1000.0)
-        send_note(note, 0, False)
-    threading.Thread(target=_worker, daemon=True).start()
-
-
-def clock_thread():
-    """Send MIDI clock (24 PPQN) while running, using current BPM."""
-    global running, bpm, midi_out
-
-    next_t = time.perf_counter()
-    while True:
-        if midi_out is None:
-            time.sleep(0.2)
-            continue
-
-        if not running:
-            time.sleep(0.01)
-            next_t = time.perf_counter()
-            continue
-
-        # MIDI clock tick interval: 60s / (BPM * 24)
-        tick = 60.0 / (max(1.0, bpm) * 24.0)
-
-        now = time.perf_counter()
-        if now >= next_t:
-            midi_out.send(mido.Message('clock'))
-            next_t += tick
-        else:
-            # sleep a fraction to reduce CPU
-            time.sleep(min(0.001, max(0.0, next_t - now)))
-
-
-def parse_json_maybe(payload: str):
-    payload = payload.strip()
-    if not payload:
-        return None
-    if payload[0] in "{[":
-        try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
-            return None
-    return None
-
+# ----------------------------
+# Main
+# ----------------------------
+midi_out = find_midi_out()
+clock = MidiClock(midi_out)
 
 def on_connect(client, userdata, flags, rc):
-    print(f"[MQTT] Connected rc={rc}")
-    client.subscribe(MQTT_TOPIC)
-    print(f"[MQTT] Subscribed to {MQTT_TOPIC}")
-
+    print("[MQTT] connected:", rc)
+    client.subscribe(TOPIC_TEMPO)
+    client.subscribe(TOPIC_TRANSPORT)
+    client.subscribe(TOPIC_NOTE)
 
 def on_message(client, userdata, msg):
-    global running, bpm
-
     topic = msg.topic
     payload = msg.payload.decode(errors="ignore").strip()
 
-    # transport can be plain "start"/"stop"
-    if topic == "groovebox/transport":
-        if payload.lower() == "start":
-            running = True
-            send_start()
-        elif payload.lower() == "stop":
-            running = False
-            send_stop()
+    if topic == TOPIC_TEMPO:
+        try:
+            data = json.loads(payload)
+            bpm = float(data.get("bpm", 120.0))
+            clock.set_bpm(bpm)
+            print(f"[TEMPO] bpm={bpm:.2f}")
+        except Exception as e:
+            print("[TEMPO] parse error:", e, payload)
+
+    elif topic == TOPIC_TRANSPORT:
+        # payload is "start" or "stop"
+        if payload == "start":
+            print("[TRANSPORT] start")
+            clock.start()
+        elif payload == "stop":
+            print("[TRANSPORT] stop")
+            clock.stop()
         else:
-            # also allow JSON { "state": "start" }
-            data = parse_json_maybe(payload)
-            if isinstance(data, dict) and "state" in data:
-                st = str(data["state"]).lower()
-                if st == "start":
-                    running = True
-                    send_start()
-                elif st == "stop":
-                    running = False
-                    send_stop()
-        return
+            print("[TRANSPORT] unknown:", payload)
 
-    if topic == "groovebox/tempo":
-        data = parse_json_maybe(payload)
-        if isinstance(data, dict) and "bpm" in data:
-            try:
-                bpm = float(data["bpm"])
-                print(f"[MQTT] BPM -> {bpm:.2f}")
-            except ValueError:
-                pass
-        return
+    elif topic == TOPIC_NOTE:
+        try:
+            data = json.loads(payload)
+            on = bool(data.get("on", True))
+            note = int(data.get("note", 36))
+            vel = int(data.get("velocity", 100))
 
-    if topic == "groovebox/note":
-        data = parse_json_maybe(payload)
-        if isinstance(data, dict):
-            try:
-                note = int(data.get("note", 36))
-                vel = int(data.get("velocity", 100))
-                on = bool(data.get("on", True))
-                send_note(note, vel, on)
+            if on:
+                midi_out.send(mido.Message("note_on", note=note, velocity=max(1, min(127, vel)), channel=0))
+                print(f"[NOTE] ON  note={note} vel={vel}")
+            else:
+                midi_out.send(mido.Message("note_off", note=note, velocity=0, channel=0))
+                print(f"[NOTE] OFF note={note}")
+        except Exception as e:
+            print("[NOTE] parse error:", e, payload)
 
-                # If it's a note_on and you don't also get note_off events, auto-gate
-                if on and "on" in data and data["on"] is True:
-                    # only gate if your ESP isn't sending note_off (but it is).
-                    # still safe — note_off twice is fine in FL.
-                    schedule_note_off(note, DEFAULT_GATE_MS)
-            except Exception as e:
-                print(f"[MQTT] bad note payload: {payload} ({e})")
-        return
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
 
-
-def main():
-    global midi_out
-    midi_out = find_midi_out()
-
-    # start clock sender thread
-    threading.Thread(target=clock_thread, daemon=True).start()
-
-    client = mqtt.Client()
-    client.on_connect = on_connect
-    client.on_message = on_message
-
-    print(f"[MQTT] Connecting to {BROKER_HOST}:{BROKER_PORT} ...")
-    client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
-    client.loop_forever()
-
-
-if __name__ == "__main__":
-    main()
+print(f"[MQTT] connecting to {BROKER_HOST}:{BROKER_PORT} ...")
+client.connect(BROKER_HOST, BROKER_PORT, 60)
+client.loop_forever()
