@@ -3,6 +3,13 @@
 #include "message_bus.h"
 #include "services.h"
 
+const char* WIFI_SSID = "Silverado@2015";
+const char* WIFI_PASS = "Krishveer@2005";
+const char* BROKER_IP = "10.0.0.126";
+
+
+
+
 // --------------------- GLOBAL MESSAGE BUS ---------------------
 MessageBus BUS;
 
@@ -11,8 +18,9 @@ ButtonService button(16);              // Your working button pin
 UIService ui;
 AudioService audio(25);                // AUDIO OUT on GPIO25 → resistor → headphones
 LEDGridService ledGrid(17, 4, 5, 18, &ui.state, &ui.cursor, ui.pattern);
-SequencerService sequencer(&ui, &ledGrid, &audio);
 LogService logger;
+CloudService cloud(WIFI_SSID, WIFI_PASS, BROKER_IP, &ui);
+SequencerService sequencer(&ui, &leds, &audio, &cloud);
 
 // --------------------- SERVICE TABLE -------------------------
 Service* services[] = {
@@ -21,8 +29,10 @@ Service* services[] = {
     &sequencer,
     &audio,
     &ledGrid,
+    &cloud,
     &logger
 };
+
 
 const int NUM_SERVICES = sizeof(services) / sizeof(Service*);
 

@@ -1,83 +1,50 @@
-import time
-import json
-import threading
+import time, json, threading
 import paho.mqtt.client as mqtt
 import mido
 
-BROKER_HOST = "127.0.0.1"
-BROKER_PORT = 1883
+BROKER = "127.0.0.1"
+PORT = 1883
+MIDI_OUT_CONTAINS = "Groovebox"
 
-MIDI_OUT_NAME_CONTAINS = "Groovebox"  # e.g. "Groovebox Clock" (loopMIDI)
-DEFAULT_BPM = 120.0
+state = {"bpm":120.0,"running":False}
 
-state = {
-    "running": False,
-    "bpm": DEFAULT_BPM,
-}
-
-def find_midi_out():
-    names = mido.get_output_names()
-    for n in names:
-        if MIDI_OUT_NAME_CONTAINS.lower() in n.lower():
+def midi_out():
+    for n in mido.get_output_names():
+        if MIDI_OUT_CONTAINS.lower() in n.lower():
             return mido.open_output(n)
-    raise RuntimeError(f"Could not find MIDI out containing '{MIDI_OUT_NAME_CONTAINS}'. उपलब्ध: {names}")
+    raise RuntimeError("MIDI out not found")
 
-midi_out = find_midi_out()
+midi = midi_out()
 
-def send_start():
-    midi_out.send(mido.Message.from_bytes([0xFA]))
-
-def send_stop():
-    midi_out.send(mido.Message.from_bytes([0xFC]))
-
-def send_clock_tick():
-    midi_out.send(mido.Message.from_bytes([0xF8]))
-
-def clock_thread():
-    # 24 PPQN -> ticks per second = bpm * 24 / 60
+def clock():
     while True:
         if state["running"]:
-            bpm = max(20.0, min(300.0, state["bpm"]))
-            tick_hz = bpm * 24.0 / 60.0
-            interval = 1.0 / tick_hz
-            send_clock_tick()
+            interval = 60.0/(state["bpm"]*24)
+            midi.send(mido.Message.from_bytes([0xF8]))
             time.sleep(interval)
         else:
             time.sleep(0.01)
 
-def on_connect(client, userdata, flags, rc):
-    client.subscribe("groovebox/tempo")
-    client.subscribe("groovebox/transport")
+def on_msg(c,u,m):
+    payload = m.payload.decode()
+    if m.topic=="groovebox/tempo":
+        state["bpm"]=json.loads(payload)["bpm"]
+    elif m.topic=="groovebox/transport":
+        if payload=="start":
+            state["running"]=True
+            midi.send(mido.Message.from_bytes([0xFA]))
+        else:
+            state["running"]=False
+            midi.send(mido.Message.from_bytes([0xFC]))
+    elif m.topic=="groovebox/note":
+        d=json.loads(payload)
+        midi.send(mido.Message("note_on",
+            note=d["note"],velocity=d["velocity"],channel=0))
 
-def on_message(client, userdata, msg):
-    try:
-        payload = msg.payload.decode("utf-8")
-        data = json.loads(payload) if payload.strip().startswith("{") else payload
-    except Exception:
-        return
+threading.Thread(target=clock,daemon=True).start()
 
-    if msg.topic == "groovebox/tempo":
-        if isinstance(data, dict) and "bpm" in data:
-            state["bpm"] = float(data["bpm"])
-            print(f"[BRIDGE] BPM = {state['bpm']}")
-    elif msg.topic == "groovebox/transport":
-        if isinstance(data, dict) and data.get("state") == "start":
-            if not state["running"]:
-                state["running"] = True
-                send_start()
-                print("[BRIDGE] START")
-        elif isinstance(data, dict) and data.get("state") == "stop":
-            if state["running"]:
-                state["running"] = False
-                send_stop()
-                print("[BRIDGE] STOP")
-
-t = threading.Thread(target=clock_thread, daemon=True)
-t.start()
-
-client = mqtt.Client()
-client.on_connect = on_connect
-client.on_message = on_message
-client.connect(BROKER_HOST, BROKER_PORT, 60)
-print("[BRIDGE] Connected. Listening…")
-client.loop_forever()
+c=mqtt.Client()
+c.on_message=on_msg
+c.connect(BROKER,PORT,60)
+c.subscribe("groovebox/#")
+c.loop_forever()
