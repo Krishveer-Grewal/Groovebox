@@ -274,3 +274,11 @@ public:
         }
     }
 };
+// =============================================================
+// LOG SERVICE (NO-OP)
+// =============================================================
+class LogService : public Service {
+public:
+    void init() override {}
+    void update() override {}
+};
